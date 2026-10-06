@@ -6,7 +6,8 @@
 #include <hyprland/src/render/pass/TexPassElement.hpp>
 #include <hyprland/src/render/pass/BorderPassElement.hpp>
 #include <hyprland/src/render/Renderer.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
 #include <hyprland/src/render/decorations/IHyprWindowDecoration.hpp>
 #include <hyprland/src/render/gl/GLTexture.hpp>
 #include <pango/pangocairo.h>
@@ -14,6 +15,10 @@
 #include "globals.hpp"
 
 using namespace Render::GL;
+
+static bool isPinned(const PHLWINDOW& w) {
+	return static_cast<bool>(w->m_state & Desktop::View::WINDOW_STATE_PINNED);
+}
 
 CHyprEasyLabel::CHyprEasyLabel(PHLWINDOW pWindow, SMotionActionDesc *actionDesc) : IHyprWindowDecoration(pWindow) {
 	m_pWindow = pWindow;
@@ -123,7 +128,7 @@ void CHyprEasyLabel::renderMotionString(Vector2D& bufferSize, const float scale)
 }
 
 
-void CHyprEasyLabel::draw(PHLMONITOR pMonitor, float const &a) {
+void CHyprEasyLabel::draw(Render::CRenderContext& ctx, PHLMONITOR pMonitor, float const& a, const Render::SWindowRenderPresentation& presentation) {
 	if (!validMapped(m_pWindow))
 		return;
 
@@ -131,7 +136,7 @@ void CHyprEasyLabel::draw(PHLMONITOR pMonitor, float const &a) {
 	if (!PWINDOW->m_ruleApplicator->decorate().valueOrDefault())
 		return;
 	const auto PWORKSPACE      = PWINDOW->m_workspace;
-	const auto WORKSPACEOFFSET = PWORKSPACE && !PWINDOW->m_pinned ? PWORKSPACE->m_renderOffset->value() : Vector2D();
+	const auto WORKSPACEOFFSET = PWORKSPACE && !isPinned(PWINDOW) ? PWORKSPACE->m_renderOffset->value() : Vector2D();
 	const auto DECOBOX = assignedBoxGlobal();
 	const auto BARBUF = DECOBOX.size() * pMonitor->m_scale;
 	//CBox       motionBox = {DECOBOX.x - pMonitor->vecPosition.x, DECOBOX.y - pMonitor->vecPosition.y, DECOBOX.w,
@@ -161,7 +166,7 @@ void CHyprEasyLabel::draw(PHLMONITOR pMonitor, float const &a) {
 	rectData.roundingPower = 2.0;
 
 
-	g_pHyprRenderer->m_renderPass.add(makeUnique<CRectPassElement>(rectData));
+	g_pHyprRenderer->draw(ctx, rectData);
 	if (m_iBorderSize) {
 		CBox       borderBox = {DECOBOX.x, DECOBOX.y, static_cast<double>(layoutWidth), static_cast<double>(layoutHeight)};
 		borderBox.translate(pMonitor->m_position*-1).scale(pMonitor->m_scale).round();
@@ -173,7 +178,7 @@ void CHyprEasyLabel::draw(PHLMONITOR pMonitor, float const &a) {
 			borderData.roundingPower = 2.0;
 			borderData.borderSize = m_iBorderSize;
 			borderData.a = a;
-			g_pHyprRenderer->m_renderPass.add(makeUnique<CBorderPassElement>(borderData));
+			g_pHyprRenderer->draw(ctx, borderData);
 			//g_pHyprOpenGL->renderBorder(borderBox, m_cBorderGradient, scaledRounding, m_iBorderSize * pMonitor->scale, a);
 		}
 	}
@@ -184,7 +189,7 @@ void CHyprEasyLabel::draw(PHLMONITOR pMonitor, float const &a) {
 	texData.box = motionBox;
 
 
-	g_pHyprRenderer->m_renderPass.add(makeUnique<CTexPassElement>(texData));
+	g_pHyprRenderer->draw(ctx, texData);
 }
 
 eDecorationType CHyprEasyLabel::getDecorationType() {
@@ -197,7 +202,7 @@ void CHyprEasyLabel::updateWindow(PHLWINDOW pWindow) {
 
 void CHyprEasyLabel::damageEntire() {
 	auto box = assignedBoxGlobal();
-	box.translate(m_pWindow->m_floatingOffset);
+	box.translate(m_pWindow->presentation().floatingOffset());
 	g_pHyprRenderer->damageBox(box);
 }
 
@@ -214,15 +219,17 @@ CBox CHyprEasyLabel::assignedBoxGlobal() {
 	const auto PWINDOW = m_pWindow.lock();
 	double boxHeight, boxWidth;
 	double boxSize;
-	boxHeight = PWINDOW->m_realSize->value().y * 0.10;
-	boxWidth = PWINDOW->m_realSize->value().x * 0.10;
+	const auto WINDOWSIZE     = PWINDOW->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+	const auto WINDOWPOS      = PWINDOW->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
+	boxHeight = WINDOWSIZE.y * 0.10;
+	boxWidth = WINDOWSIZE.x * 0.10;
 	boxSize = std::min(boxHeight, boxWidth);
-	double boxX = PWINDOW->m_realPosition->value().x + (PWINDOW->m_realSize->value().x-boxSize)/2;
-	double boxY = PWINDOW->m_realPosition->value().y + (PWINDOW->m_realSize->value().y-boxSize)/2;
+	double boxX = WINDOWPOS.x + (WINDOWSIZE.x-boxSize)/2;
+	double boxY = WINDOWPOS.y + (WINDOWSIZE.y-boxSize)/2;
 	CBox box = {boxX, boxY, boxSize, boxSize};
 
 	const auto PWORKSPACE      = PWINDOW->m_workspace;
-	const auto WORKSPACEOFFSET = PWORKSPACE && !PWINDOW->m_pinned ? PWORKSPACE->m_renderOffset->value() : Vector2D();
+	const auto WORKSPACEOFFSET = PWORKSPACE && !isPinned(PWINDOW) ? PWORKSPACE->m_renderOffset->value() : Vector2D();
 
 	return box.translate(WORKSPACEOFFSET);
 }

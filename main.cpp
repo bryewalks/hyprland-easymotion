@@ -1,12 +1,14 @@
-#include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/workspace/HLWorkspace.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <string>
 #include <unistd.h>
 
 #include <any>
+#include <expected>
+#include <numbers>
 #include <ranges>
 #include <hyprland/src/Compositor.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/config/values/types/BoolValue.hpp>
 #include <hyprland/src/config/values/types/ColorValue.hpp>
@@ -16,7 +18,11 @@
 #include <hyprland/src/config/values/types/IntValue.hpp>
 #include <hyprland/src/config/values/types/StringValue.hpp>
 #include <hyprland/src/config/shared/parserUtils/ParserUtils.hpp>
-#include <hyprland/src/managers/EventManager.hpp>
+#include <hyprland/src/ipc/s2/S2.hpp>
+#include <hyprland/src/keybinds/Manager.hpp>
+#include <hyprland/src/state/MonitorState.hpp>
+#include <hyprland/src/desktop/state/WindowState.hpp>
+#include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/debug/log/Logger.hpp>
@@ -56,13 +62,19 @@ APICALL EXPORT std::string PLUGIN_API_VERSION() {
 
 SDispatchResult easymotionExitDispatch(std::string args)
 {
-	for (auto &ml : g_pGlobalState->motionLabels | std::ranges::views::reverse) {
-		if (ml->m_origFSMode != ml->getOwner()->m_fullscreenState.internal)
-			g_pCompositor->setWindowFullscreenInternal(ml->getOwner(), ml->m_origFSMode);
-		ml->getOwner()->removeWindowDeco(ml.get());
+	// copy, since removing a decoration can destroy its label and erase it from the list
+	const auto labels = g_pGlobalState->motionLabels;
+	for (auto &wl : labels | std::ranges::views::reverse) {
+		const auto ml = wl.lock();
+		if (!ml)
+			continue;
+		const auto owner = ml->getOwner();
+		if (ml->m_origFSMode != Fullscreen::controller()->getFullscreenModes(owner).internal)
+			Fullscreen::controller()->setFullscreenMode(owner, ml->m_origFSMode);
+		HyprlandAPI::removeWindowDecoration(PHANDLE, ml.get());
 	}
 	HyprlandAPI::invokeHyprctlCommand("dispatch", "submap reset");
-	g_pEventManager->postEvent(SHyprIPCEvent{"easymotionexit", ""});
+	IPC::Socket2::sock()->postEvent({"easymotionexit", ""});
 	return {};
 
 }
@@ -70,21 +82,15 @@ SDispatchResult easymotionExitDispatch(std::string args)
 SDispatchResult easymotionActionDispatch(std::string args)
 {
 	auto runAction = [](const std::string& cmd) {
-		if (cmd.starts_with("dispatch:")) {
-			auto rest = cmd.substr(9);
-			auto sp = rest.find(' ');
-			auto name = sp != std::string::npos ? rest.substr(0, sp) : rest;
-			auto arg  = sp != std::string::npos ? rest.substr(sp + 1) : std::string{};
-			auto it = g_pKeybindManager->m_dispatchers.find(name);
-			if (it != g_pKeybindManager->m_dispatchers.end())
-				it->second(arg);
-		} else {
-			g_pKeybindManager->m_dispatchers["exec"](cmd);
-		}
+		if (cmd.starts_with("dispatch:"))
+			HyprlandAPI::invokeHyprctlCommand("dispatch", cmd.substr(9));
+		else
+			HyprlandAPI::invokeHyprctlCommand("dispatch", "exec " + cmd);
 	};
-	for (auto &ml : g_pGlobalState->motionLabels) {
-		if (ml->m_szKey == args) {
-			g_pEventManager->postEvent(SHyprIPCEvent{"easymotionselect", std::format("{},{}", ml->m_szWindowAddress, ml->m_szKey)});
+	for (auto &wl : g_pGlobalState->motionLabels) {
+		const auto ml = wl.lock();
+		if (ml && ml->m_szKey == args) {
+			IPC::Socket2::sock()->postEvent({"easymotionselect", std::format("{},{}", ml->m_szWindowAddress, ml->m_szKey)});
 			runAction(ml->m_szActionCmd);
 			easymotionExitDispatch("");
 			break;
@@ -94,33 +100,45 @@ SDispatchResult easymotionActionDispatch(std::string args)
 	return {};
 }
 
+void addKeybindToSubmap(std::expected<Keybinds::CBind, std::string>&& bind) {
+	if (!bind) {
+		Log::logger->log(Log::WARN, "easymotion: failed to create keybind: {}", bind.error());
+		return;
+	}
+	Keybinds::mgr()->addBind(std::move(*bind));
+}
+
 void addEasyMotionKeybinds()
 {
-	g_pKeybindManager->addKeybind(SKeybind{"escape", {}, 0, 0, 0, {}, "easymotionexit", "", 0, "__easymotionsubmap__", "", "", 0, 0, 0, 0, 0, 0, 0, 0});
+	const auto SUBMAP = std::string{"__easymotionsubmap__"};
+	addKeybindToSubmap(Keybinds::CBind::make({"escape"}, 0, [] {
+		easymotionExitDispatch("");
+		return Keybinds::SBindResult{};
+	}, Keybinds::SExtraBindArgs{.metadata = {.displayKey = "escape", .handler = "easymotionexit", .submap = SUBMAP}}));
 	//catchall
-	g_pKeybindManager->addKeybind(SKeybind{"", {}, 0, 1, 0, {}, "", "", 0, "__easymotionsubmap__", "", "", 0, 0, 0, 0, 0, 0, 0, 0});
+	addKeybindToSubmap(Keybinds::CBind::make({"catchall"}, Keybinds::BIND_FLAG_CATCH_ALL, [] { return Keybinds::SBindResult{}; },
+		Keybinds::SExtraBindArgs{.metadata = {.displayKey = "catchall", .submap = SUBMAP}}));
 }
 
 
 void addLabelToWindow(PHLWINDOW window, SMotionActionDesc *actionDesc, std::string &key, std::string &label)
 {
-	UP<CHyprEasyLabel> motionlabel = makeUnique<CHyprEasyLabel>(window, actionDesc);
+	SP<CHyprEasyLabel> motionlabel = makeShared<CHyprEasyLabel>(window, actionDesc);
 	motionlabel->m_szKey = key;
 	motionlabel->m_szLabel = label;
 	g_pGlobalState->motionLabels.emplace_back(motionlabel);
 	motionlabel->m_self = motionlabel;
-	motionlabel->draw(window->m_monitor.lock(), 1.0);
-	motionlabel->m_origFSMode = window->m_fullscreenState.internal;
-	if ((motionlabel->m_origFSMode != eFullscreenMode::FSMODE_NONE) && (actionDesc->fullscreen_action != "none"))
+	motionlabel->m_origFSMode = Fullscreen::controller()->getFullscreenModes(window).internal;
+	if ((motionlabel->m_origFSMode != Fullscreen::FSMODE_NONE) && (actionDesc->fullscreen_action != "none"))
 	{
 		if (actionDesc->fullscreen_action == "maximize")
 		{
-			g_pCompositor->setWindowFullscreenInternal(window, FSMODE_MAXIMIZED);
+			Fullscreen::controller()->setFullscreenMode(window, Fullscreen::FSMODE_MAXIMIZED);
 		} else if (actionDesc->fullscreen_action == "toggle") {
-			g_pCompositor->setWindowFullscreenInternal(window, FSMODE_NONE);
+			Fullscreen::controller()->setFullscreenMode(window, Fullscreen::FSMODE_NONE);
 		}
 	}
-	HyprlandAPI::addWindowDecoration(PHANDLE, window, std::move(motionlabel));
+	HyprlandAPI::addWindowDecoration(PHANDLE, window, motionlabel);
 }
 
 static bool parseBorderGradient(std::string VALUE, Config::CGradientValueData *DATA) {
@@ -135,7 +153,7 @@ static bool parseBorderGradient(std::string VALUE, Config::CGradientValueData *D
 		if (var.find("deg") != std::string::npos) {
 			// last arg
 			try {
-				DATA->m_angle = std::stoi(var.substr(0, var.find("deg"))) * (PI / 180.0); // radians
+				DATA->m_angle = std::stoi(var.substr(0, var.find("deg"))) * (std::numbers::pi / 180.0); // radians
 			} catch (...) {
         		Log::logger->log(Log::WARN, "Error parsing gradient {}", V);
 				return false;
@@ -246,10 +264,10 @@ SDispatchResult easymotionDispatch(std::string args)
 	std::transform(actionDesc.fullscreen_action.begin(), actionDesc.fullscreen_action.end(), actionDesc.fullscreen_action.begin(), tolower);
 	int key_idx = 0;
 
-	for (auto &w : g_pCompositor->m_windows) {
-		for (auto &m : g_pCompositor->m_monitors) {
+	for (auto &w : Desktop::windowState()->windows()) {
+		for (auto &m : State::monitorState()->monitors()) {
 			if (w->m_workspace == m->m_activeWorkspace || m->m_activeSpecialWorkspace == w->m_workspace) {
-				if (w->isHidden() || !w->m_isMapped || w->m_fadingOut)
+				if (w->isHidden() || !w->mapped())
 					continue;
 				if (m->m_activeSpecialWorkspace && w->m_workspace != m->m_activeSpecialWorkspace && actionDesc.only_special)
 					continue;
