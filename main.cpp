@@ -9,6 +9,7 @@
 #include <ranges>
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/config/values/types/BoolValue.hpp>
 #include <hyprland/src/config/values/types/ColorValue.hpp>
@@ -142,6 +143,8 @@ void addLabelToWindow(PHLWINDOW window, SMotionActionDesc *actionDesc, std::stri
 		}
 	}
 	HyprlandAPI::addWindowDecoration(PHANDLE, window, motionlabel);
+	// adding a decoration does not damage the window, so force a redraw or the label never appears
+	g_pHyprRenderer->damageWindow(window, true);
 }
 
 static bool parseBorderGradient(std::string VALUE, Config::CGradientValueData *DATA) {
