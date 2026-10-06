@@ -73,7 +73,7 @@ SDispatchResult easymotionExitDispatch(std::string args)
 			Fullscreen::controller()->setFullscreenMode(owner, ml->m_origFSMode);
 		HyprlandAPI::removeWindowDecoration(PHANDLE, ml.get());
 	}
-	HyprlandAPI::invokeHyprctlCommand("dispatch", "submap reset");
+	HyprlandAPI::invokeHyprctlCommand("eval", R"(hl.dsp.submap("reset"))");
 	IPC::Socket2::sock()->postEvent({"easymotionexit", ""});
 	return {};
 
@@ -82,8 +82,10 @@ SDispatchResult easymotionExitDispatch(std::string args)
 SDispatchResult easymotionActionDispatch(std::string args)
 {
 	auto runAction = [](const std::string& cmd) {
-		if (cmd.starts_with("dispatch:"))
-			HyprlandAPI::invokeHyprctlCommand("dispatch", cmd.substr(9));
+		// Hyprland 0.56 parses dispatch strings as Lua, so "dispatch:" (legacy syntax) fails.
+		// "lua:<code>" runs <code> through eval instead.
+		if (cmd.starts_with("lua:"))
+			HyprlandAPI::invokeHyprctlCommand("eval", cmd.substr(4));
 		else
 			HyprlandAPI::invokeHyprctlCommand("dispatch", "exec " + cmd);
 	};
@@ -281,7 +283,7 @@ SDispatchResult easymotionDispatch(std::string args)
 	}
 
 	if (!g_pGlobalState->motionLabels.empty())
-		HyprlandAPI::invokeHyprctlCommand("dispatch", "submap __easymotionsubmap__");
+		HyprlandAPI::invokeHyprctlCommand("eval", R"(hl.dsp.submap("__easymotionsubmap__"))");
 
 	return {};
 }
