@@ -123,13 +123,21 @@ void addEasyMotionKeybinds()
 	    SExtraBindArgs{.metadata = {.submap = "__easymotionsubmap__"}});
 	if (escBind)
 		mgr()->addBind(std::move(*escBind));
+	else
+		Log::logger->log(Log::ERR, "easymotion: failed to register escape bind: {}", escBind.error());
 
+	// CBind::make rejects an empty keys list ("A bind requires a trigger") even
+	// for a BIND_FLAG_CATCH_ALL bind; the manager special-cases CATCH_ALL binds
+	// to skip the per-key match anyway (see CKeybindManager::processEvent), so
+	// the placeholder key here is never actually matched against.
 	auto catchAllBind = CBind::make(
-	    {}, BIND_FLAG_CATCH_ALL,
+	    {"escape"}, BIND_FLAG_CATCH_ALL | BIND_FLAG_IGNORE_MODS,
 	    []() -> SBindResult { return {}; },
 	    SExtraBindArgs{.metadata = {.submap = "__easymotionsubmap__"}});
 	if (catchAllBind)
 		mgr()->addBind(std::move(*catchAllBind));
+	else
+		Log::logger->log(Log::ERR, "easymotion: failed to register catch-all bind: {}", catchAllBind.error());
 }
 
 
