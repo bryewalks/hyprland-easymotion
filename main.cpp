@@ -1,4 +1,4 @@
-#include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/desktop/DesktopTypes.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <string>
 #include <unistd.h>
@@ -7,11 +7,13 @@
 #include <ranges>
 #include <cmath>
 #include <hyprland/src/Compositor.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
-#include <hyprland/src/managers/EventManager.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/event/EventBus.hpp>
+#include <hyprland/src/keybinds/Manager.hpp>
+#include <hyprland/src/keybinds/Bind.hpp>
 #include <hyprland/src/debug/log/Logger.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
@@ -29,6 +31,10 @@
 #include "globals.hpp"
 
 using namespace Hyprutils::String;
+
+// EventManager/SHyprIPCEvent was replaced by the typed CEventBus custom-event API in 0.56.
+inline SP<Event::CEventBus::CCustomEvent> g_pExitEvent;
+inline SP<Event::CEventBus::CCustomEvent> g_pSelectEvent;
 
 // Plugin config value pointers
 inline SP<Config::Values::CIntValue>    g_textSize;
@@ -57,10 +63,10 @@ SDispatchResult easymotionExitDispatch(std::string args)
 	for (auto &ml : g_pGlobalState->motionLabels | std::ranges::views::reverse) {
 		if (ml->m_origFSMode != Fullscreen::controller()->getFullscreenModes(ml->getOwner()).internal)
 			Fullscreen::controller()->setFullscreenMode(ml->getOwner(), ml->m_origFSMode);
-		ml->getOwner()->removeWindowDeco(ml.get());
+		ml->getOwner()->presentation().removeDecoration(ml.get());
 	}
 	HyprlandAPI::invokeHyprctlCommand("dispatch", "submap reset");
-	g_pEventManager->postEvent(SHyprIPCEvent{"easymotionexit", ""});
+	g_pExitEvent->emit({});
 	return {};
 
 }
@@ -69,8 +75,10 @@ SDispatchResult easymotionActionDispatch(std::string args)
 {
 	for (auto &ml : g_pGlobalState->motionLabels) {
 		if (ml->m_szKey == args) {
-			g_pEventManager->postEvent(SHyprIPCEvent{"easymotionselect", std::format("{},{}", ml->m_szWindowAddress, ml->m_szKey)});
-			g_pKeybindManager->m_dispatchers["exec"](ml->m_szActionCmd);
+			g_pSelectEvent->emit({ml->m_szWindowAddress, ml->m_szKey});
+			// g_pKeybindManager->m_dispatchers is gone in 0.56; go through the
+			// public hyprctl route to invoke the "exec" dispatcher instead.
+			HyprlandAPI::invokeHyprctlCommand("dispatch", "exec " + ml->m_szActionCmd);
 			easymotionExitDispatch("");
 			break;
 		}
@@ -79,21 +87,44 @@ SDispatchResult easymotionActionDispatch(std::string args)
 	return {};
 }
 
+// g_pKeybindManager/SKeybind are gone in 0.56; binds are now built with
+// Keybinds::CBind::make() and registered on Keybinds::mgr(). This is a plugin-
+// internal API with no header-documented contract for the catch-all bind below,
+// so the exact flag/arg choice needs a live check (escape + stray keys while the
+// easymotion submap is up should not leak to global binds).
 void addEasyMotionKeybinds()
 {
-	g_pKeybindManager->addKeybind(SKeybind{"escape", {}, 0, 0, 0, {}, "easymotionexit", "", 0, "__easymotionsubmap__", "", "", 0, 0, 0, 0, 0, 0, 0, 0});
-	g_pKeybindManager->addKeybind(SKeybind{"", {}, 0, 1, 0, {}, "", "", 0, "__easymotionsubmap__", "", "", 0, 0, 0, 0, 0, 0, 0, 0});
+	using namespace Keybinds;
+
+	auto escBind = CBind::make(
+	    {"escape"}, 0,
+	    []() -> SBindResult {
+		    easymotionExitDispatch("");
+		    return {};
+	    },
+	    SExtraBindArgs{.metadata = {.submap = "__easymotionsubmap__"}});
+	if (escBind)
+		mgr()->addBind(std::move(*escBind));
+
+	auto catchAllBind = CBind::make(
+	    {}, BIND_FLAG_CATCH_ALL,
+	    []() -> SBindResult { return {}; },
+	    SExtraBindArgs{.metadata = {.submap = "__easymotionsubmap__"}});
+	if (catchAllBind)
+		mgr()->addBind(std::move(*catchAllBind));
 }
 
 
 void addLabelToWindow(PHLWINDOW window, SMotionActionDesc *actionDesc, std::string &key, std::string &label)
 {
-	UP<CHyprEasyLabel> motionlabel = makeUnique<CHyprEasyLabel>(window, actionDesc);
+	// addWindowDecoration now takes ownership as SP, not UP.
+	SP<CHyprEasyLabel> motionlabel = makeShared<CHyprEasyLabel>(window, actionDesc);
 	motionlabel->m_szKey = key;
 	motionlabel->m_szLabel = label;
 	g_pGlobalState->motionLabels.emplace_back(motionlabel);
 	motionlabel->m_self = motionlabel;
-	motionlabel->draw(window->m_monitor.lock(), 1.0);
+	// draw() now requires a live CRenderContext from the render pass, which isn't
+	// available here; the decoration framework draws it on the next real frame.
 	motionlabel->m_origFSMode = Fullscreen::controller()->getFullscreenModes(window).internal;
 	if ((motionlabel->m_origFSMode != Fullscreen::FSMODE_NONE) && (actionDesc->fullscreen_action != "none"))
 	{
@@ -247,7 +278,7 @@ SDispatchResult easymotionDispatch(std::string args)
 	for (auto &w : Desktop::viewState()->windows()) {
 		for (auto &m : State::monitorState()->monitors()) {
 			if (w->m_workspace == m->m_activeWorkspace || m->m_activeSpecialWorkspace == w->m_workspace) {
-				if (w->isHidden() || !w->m_isMapped)
+				if (w->isHidden() || !w->mapped())
 					continue;
 				if (m->m_activeSpecialWorkspace && w->m_workspace != m->m_activeSpecialWorkspace && actionDesc.only_special)
 					continue;
@@ -374,6 +405,14 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
 
 	g_pGlobalState = makeUnique<SGlobalState>();
+
+	g_pExitEvent = makeShared<Event::CEventBus::CCustomEvent>("easymotionexit", std::vector<Event::CEventBus::CCustomEvent::eType>{});
+	HyprlandAPI::addEvent(PHANDLE, g_pExitEvent);
+	g_pSelectEvent = makeShared<Event::CEventBus::CCustomEvent>(
+	    "easymotionselect",
+	    std::vector<Event::CEventBus::CCustomEvent::eType>{Event::CEventBus::CCustomEvent::TYPE_STRING, Event::CEventBus::CCustomEvent::TYPE_STRING});
+	HyprlandAPI::addEvent(PHANDLE, g_pSelectEvent);
+
 	HyprlandAPI::addDispatcherV2(PHANDLE, "easymotion", easymotionDispatch);
 	HyprlandAPI::addDispatcherV2(PHANDLE, "easymotionaction", easymotionActionDispatch);
 	HyprlandAPI::addDispatcherV2(PHANDLE, "easymotionexit", easymotionExitDispatch);
