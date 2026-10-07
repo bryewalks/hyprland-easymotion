@@ -14,6 +14,8 @@
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/keybinds/Manager.hpp>
 #include <hyprland/src/keybinds/Bind.hpp>
+#include <lua.h>
+#include <lauxlib.h>
 #include <hyprland/src/debug/log/Logger.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
@@ -92,6 +94,17 @@ SDispatchResult easymotionActionDispatch(std::string args)
 // internal API with no header-documented contract for the catch-all bind below,
 // so the exact flag/arg choice needs a live check (escape + stray keys while the
 // easymotion submap is up should not leak to global binds).
+SDispatchResult easymotionDispatch(std::string args);
+
+// hl.dsp is a static, hardcoded table of built-in dispatchers (0.56); plugins
+// have no way to add to it. The Lua-facing entry point is instead
+// hl.plugin.<namespace>.<name>, registered via HyprlandAPI::addLuaFunction.
+static int luaEasymotionDispatch(lua_State* L) {
+	const char* args = luaL_optstring(L, 1, "");
+	easymotionDispatch(std::string(args));
+	return 0;
+}
+
 void addEasyMotionKeybinds()
 {
 	using namespace Keybinds;
@@ -414,6 +427,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 	HyprlandAPI::addEvent(PHANDLE, g_pSelectEvent);
 
 	HyprlandAPI::addDispatcherV2(PHANDLE, "easymotion", easymotionDispatch);
+	HyprlandAPI::addLuaFunction(PHANDLE, "easymotion", "dispatch", luaEasymotionDispatch);
 	HyprlandAPI::addDispatcherV2(PHANDLE, "easymotionaction", easymotionActionDispatch);
 	HyprlandAPI::addDispatcherV2(PHANDLE, "easymotionexit", easymotionExitDispatch);
 	static auto KPHOOK = Event::bus()->m_events.input.keyboard.key.listen([&](IKeyboard::SKeyEvent ev, Event::SCallbackInfo& info) {
