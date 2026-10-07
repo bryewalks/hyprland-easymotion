@@ -46,8 +46,8 @@ inline SP<Event::CEventBus::CCustomEvent> g_pSelectEvent;
 
 // Plugin config value pointers
 inline SP<Config::Values::CIntValue>    g_textSize;
-inline SP<Config::Values::CIntValue>    g_textColor;
-inline SP<Config::Values::CIntValue>    g_bgColor;
+inline SP<Config::Values::CStringValue> g_textColor;
+inline SP<Config::Values::CStringValue> g_bgColor;
 inline SP<Config::Values::CStringValue> g_textFont;
 inline SP<Config::Values::CStringValue> g_textPadding;
 inline SP<Config::Values::CIntValue>    g_borderSize;
@@ -237,8 +237,8 @@ SDispatchResult easymotionDispatch(std::string args)
 	SMotionActionDesc actionDesc;
 
 	actionDesc.textSize = configGetInt(g_textSize);
-	actionDesc.textColor = CHyprColor(configGetInt(g_textColor));
-	actionDesc.backgroundColor = CHyprColor(configGetInt(g_bgColor));
+	actionDesc.textColor = CHyprColor(Config::ParserUtils::parseColor(configGetString(g_textColor)).value_or(0xffffffff));
+	actionDesc.backgroundColor = CHyprColor(Config::ParserUtils::parseColor(configGetString(g_bgColor)).value_or(0xff));
 	actionDesc.textFont = configGetString(g_textFont);
 	CVarList2 cpadding = CVarList2(configGetString(g_textPadding));
 	actionDesc.boxPadding.parseGapData(cpadding);
@@ -371,16 +371,16 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 	    Config::Values::SIntValueOptions{});
 	HyprlandAPI::addConfigValueV2(PHANDLE, g_textSize);
 
-	g_textColor = makeShared<Config::Values::CIntValue>(
-	    "plugin:easymotion:textcolor", "Text color",
-	    Config::ParserUtils::parseColor("rgba(ffffffff)").value_or(0xffffffff),
-	    Config::Values::SIntValueOptions{});
+	// CStringValue + runtime parseColor, same as bordercolor below, rather than
+	// CIntValue: takes a plain "rgba(...)" string instead of a packed int, so
+	// the Nix/Lua config doesn't need to pre-pack ParserUtils::parseColor's
+	// 0xAARRGGBB layout itself.
+	g_textColor = makeShared<Config::Values::CStringValue>(
+	    "plugin:easymotion:textcolor", "Text color", "rgba(ffffffff)", Config::Values::SStringValueOptions{});
 	HyprlandAPI::addConfigValueV2(PHANDLE, g_textColor);
 
-	g_bgColor = makeShared<Config::Values::CIntValue>(
-	    "plugin:easymotion:bgcolor", "Background color",
-	    Config::ParserUtils::parseColor("rgba(000000ff)").value_or(0xff),
-	    Config::Values::SIntValueOptions{});
+	g_bgColor = makeShared<Config::Values::CStringValue>(
+	    "plugin:easymotion:bgcolor", "Background color", "rgba(000000ff)", Config::Values::SStringValueOptions{});
 	HyprlandAPI::addConfigValueV2(PHANDLE, g_bgColor);
 
 	g_textFont = makeShared<Config::Values::CStringValue>(
