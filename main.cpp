@@ -14,6 +14,7 @@
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/keybinds/Manager.hpp>
 #include <hyprland/src/keybinds/Bind.hpp>
+#include <hyprland/src/config/shared/actions/ConfigActions.hpp>
 // lua.h/lauxlib.h are plain C headers with no extern "C" guard of their own;
 // without this wrapper their symbols get C++ name-mangled and fail to resolve
 // against Hyprland's own exported (unmangled) Lua symbols at dlopen time.
@@ -72,7 +73,12 @@ SDispatchResult easymotionExitDispatch(std::string args)
 			Fullscreen::controller()->setFullscreenMode(ml->getOwner(), ml->m_origFSMode);
 		ml->getOwner()->presentation().removeDecoration(ml.get());
 	}
-	HyprlandAPI::invokeHyprctlCommand("dispatch", "submap reset");
+	// hyprctl's "dispatch" verb is Lua-expression evaluation in 0.56
+	// (hl.dispatch(<text>)), not the old "name args" split; the old-style call
+	// here silently errored every time instead of resetting the submap.
+	// Config::Actions::setSubmap() is a direct, documented C++ entry point for
+	// the same effect and avoids an IPC round-trip + Lua escaping altogether.
+	Config::Actions::setSubmap("reset");
 	g_pExitEvent->emit({});
 	return {};
 
@@ -83,9 +89,18 @@ SDispatchResult easymotionActionDispatch(std::string args)
 	for (auto &ml : g_pGlobalState->motionLabels) {
 		if (ml->m_szKey == args) {
 			g_pSelectEvent->emit({ml->m_szWindowAddress, ml->m_szKey});
-			// g_pKeybindManager->m_dispatchers is gone in 0.56; go through the
-			// public hyprctl route to invoke the "exec" dispatcher instead.
-			HyprlandAPI::invokeHyprctlCommand("dispatch", "exec " + ml->m_szActionCmd);
+			// g_pKeybindManager->m_dispatchers is gone in 0.56. hyprctl's
+			// "dispatch" verb now evaluates a Lua expression
+			// (hl.dispatch(<text>)) rather than splitting "name args", so the
+			// action command has to be embedded as a Lua string literal.
+			std::string escapedCmd;
+			escapedCmd.reserve(ml->m_szActionCmd.size());
+			for (char c : ml->m_szActionCmd) {
+				if (c == '\\' || c == '"')
+					escapedCmd += '\\';
+				escapedCmd += c;
+			}
+			HyprlandAPI::invokeHyprctlCommand("dispatch", "hl.dsp.exec_cmd(\"" + escapedCmd + "\")");
 			easymotionExitDispatch("");
 			break;
 		}
@@ -318,7 +333,7 @@ SDispatchResult easymotionDispatch(std::string args)
 	}
 
 	if (!g_pGlobalState->motionLabels.empty())
-		HyprlandAPI::invokeHyprctlCommand("dispatch", "submap __easymotionsubmap__");
+		Config::Actions::setSubmap("__easymotionsubmap__");
 
 	return {};
 }
