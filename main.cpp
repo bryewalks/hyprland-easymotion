@@ -14,8 +14,13 @@
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/keybinds/Manager.hpp>
 #include <hyprland/src/keybinds/Bind.hpp>
+// lua.h/lauxlib.h are plain C headers with no extern "C" guard of their own;
+// without this wrapper their symbols get C++ name-mangled and fail to resolve
+// against Hyprland's own exported (unmangled) Lua symbols at dlopen time.
+extern "C" {
 #include <lua.h>
 #include <lauxlib.h>
+}
 #include <hyprland/src/debug/log/Logger.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
