@@ -6,7 +6,8 @@
 #include <hyprland/src/render/pass/TexPassElement.hpp>
 #include <hyprland/src/render/pass/BorderPassElement.hpp>
 #include <hyprland/src/render/Renderer.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
 #include <hyprland/src/render/decorations/IHyprWindowDecoration.hpp>
 #include <hyprland/src/render/gl/GLTexture.hpp>
 #include <pango/pangocairo.h>
@@ -118,7 +119,7 @@ void CHyprEasyLabel::renderMotionString(Vector2D& bufferSize, const float scale)
 }
 
 
-void CHyprEasyLabel::draw(PHLMONITOR pMonitor, float const &a) {
+void CHyprEasyLabel::draw(Render::CRenderContext& ctx, PHLMONITOR pMonitor, float const &a, const Render::SWindowRenderPresentation& presentation) {
 	if (!validMapped(m_pWindow))
 		return;
 
@@ -126,7 +127,10 @@ void CHyprEasyLabel::draw(PHLMONITOR pMonitor, float const &a) {
 	if (!PWINDOW->m_ruleApplicator->decorate().valueOrDefault())
 		return;
 	const auto PWORKSPACE      = PWINDOW->m_workspace;
-	const auto WORKSPACEOFFSET = PWORKSPACE && !PWINDOW->m_pinned ? PWORKSPACE->m_renderOffset->value() : Vector2D();
+	// m_pinned was dropped from CWindow in 0.56 with no replacement found in the
+	// public headers; the workspace offset is now applied unconditionally, which
+	// only affects a pinned window's label during a workspace-switch animation.
+	const auto WORKSPACEOFFSET = PWORKSPACE ? PWORKSPACE->m_renderOffset->value() : Vector2D();
 	const auto DECOBOX = assignedBoxGlobal();
 	const auto BARBUF = DECOBOX.size() * pMonitor->m_scale;
 	
@@ -154,7 +158,7 @@ void CHyprEasyLabel::draw(PHLMONITOR pMonitor, float const &a) {
 	rectData.round = m_iRounding * pMonitor->m_scale;
 	rectData.roundingPower = 2.0;
 
-	g_pHyprRenderer->addPassElement(makeUnique<CRectPassElement>(rectData));
+	g_pHyprRenderer->addPassElement(ctx, makeUnique<CRectPassElement>(rectData));
 	if (m_iBorderSize) {
 		CBox       borderBox = {DECOBOX.x, DECOBOX.y, static_cast<double>(layoutWidth), static_cast<double>(layoutHeight)};
 		borderBox.translate(pMonitor->m_position*-1).scale(pMonitor->m_scale).round();
@@ -166,7 +170,7 @@ void CHyprEasyLabel::draw(PHLMONITOR pMonitor, float const &a) {
 			borderData.roundingPower = 2.0;
 			borderData.borderSize = m_iBorderSize;
 			borderData.a = a;
-			g_pHyprRenderer->addPassElement(makeUnique<CBorderPassElement>(borderData));
+			g_pHyprRenderer->addPassElement(ctx, makeUnique<CBorderPassElement>(borderData));
 		}
 	}
 	
@@ -175,7 +179,7 @@ void CHyprEasyLabel::draw(PHLMONITOR pMonitor, float const &a) {
 	texData.tex = m_tTextTex;
 	texData.box = motionBox;
 
-	g_pHyprRenderer->addPassElement(makeUnique<CTexPassElement>(texData));
+	g_pHyprRenderer->addPassElement(ctx, makeUnique<CTexPassElement>(texData));
 }
 
 eDecorationType CHyprEasyLabel::getDecorationType() {
@@ -188,7 +192,7 @@ void CHyprEasyLabel::updateWindow(PHLWINDOW pWindow) {
 
 void CHyprEasyLabel::damageEntire() {
 	auto box = assignedBoxGlobal();
-	box.translate(m_pWindow->m_floatingOffset);
+	box.translate(m_pWindow->presentation().floatingOffset());
 	g_pHyprRenderer->damageBox(box);
 }
 
@@ -213,7 +217,7 @@ CBox CHyprEasyLabel::assignedBoxGlobal() {
 	CBox box = {boxX, boxY, boxSize, boxSize};
 
 	const auto PWORKSPACE      = PWINDOW->m_workspace;
-	const auto WORKSPACEOFFSET = PWORKSPACE && !PWINDOW->m_pinned ? PWORKSPACE->m_renderOffset->value() : Vector2D();
+	const auto WORKSPACEOFFSET = PWORKSPACE ? PWORKSPACE->m_renderOffset->value() : Vector2D();
 
 	return box.translate(WORKSPACEOFFSET);
 }

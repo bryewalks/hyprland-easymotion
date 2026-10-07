@@ -6,7 +6,7 @@
 #include <hyprland/src/render/decorations/IHyprWindowDecoration.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/devices/IKeyboard.hpp>
-#include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/desktop/DesktopTypes.hpp>
 #include <hyprland/src/render/gl/GLTexture.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include "globals.hpp"
@@ -20,7 +20,7 @@ class CHyprEasyLabel : public IHyprWindowDecoration {
 
 		virtual void                       onPositioningReply(const SDecorationPositioningReply& reply);
 
-		virtual void                       draw(PHLMONITOR, float const &a);
+		virtual void                       draw(Render::CRenderContext& ctx, PHLMONITOR, float const &a, const Render::SWindowRenderPresentation& presentation);
 
 		virtual eDecorationType            getDecorationType();
 

@@ -1,4 +1,4 @@
-#include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/desktop/DesktopTypes.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <string>
 #include <unistd.h>
@@ -7,11 +7,21 @@
 #include <ranges>
 #include <cmath>
 #include <hyprland/src/Compositor.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
-#include <hyprland/src/managers/EventManager.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/event/EventBus.hpp>
+#include <hyprland/src/keybinds/Manager.hpp>
+#include <hyprland/src/keybinds/Bind.hpp>
+#include <hyprland/src/config/shared/actions/ConfigActions.hpp>
+// lua.h/lauxlib.h are plain C headers with no extern "C" guard of their own;
+// without this wrapper their symbols get C++ name-mangled and fail to resolve
+// against Hyprland's own exported (unmangled) Lua symbols at dlopen time.
+extern "C" {
+#include <lua.h>
+#include <lauxlib.h>
+}
 #include <hyprland/src/debug/log/Logger.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
@@ -30,10 +40,14 @@
 
 using namespace Hyprutils::String;
 
+// EventManager/SHyprIPCEvent was replaced by the typed CEventBus custom-event API in 0.56.
+inline SP<Event::CEventBus::CCustomEvent> g_pExitEvent;
+inline SP<Event::CEventBus::CCustomEvent> g_pSelectEvent;
+
 // Plugin config value pointers
 inline SP<Config::Values::CIntValue>    g_textSize;
-inline SP<Config::Values::CIntValue>    g_textColor;
-inline SP<Config::Values::CIntValue>    g_bgColor;
+inline SP<Config::Values::CStringValue> g_textColor;
+inline SP<Config::Values::CStringValue> g_bgColor;
 inline SP<Config::Values::CStringValue> g_textFont;
 inline SP<Config::Values::CStringValue> g_textPadding;
 inline SP<Config::Values::CIntValue>    g_borderSize;
@@ -57,10 +71,15 @@ SDispatchResult easymotionExitDispatch(std::string args)
 	for (auto &ml : g_pGlobalState->motionLabels | std::ranges::views::reverse) {
 		if (ml->m_origFSMode != Fullscreen::controller()->getFullscreenModes(ml->getOwner()).internal)
 			Fullscreen::controller()->setFullscreenMode(ml->getOwner(), ml->m_origFSMode);
-		ml->getOwner()->removeWindowDeco(ml.get());
+		ml->getOwner()->presentation().removeDecoration(ml.get());
 	}
-	HyprlandAPI::invokeHyprctlCommand("dispatch", "submap reset");
-	g_pEventManager->postEvent(SHyprIPCEvent{"easymotionexit", ""});
+	// hyprctl's "dispatch" verb is Lua-expression evaluation in 0.56
+	// (hl.dispatch(<text>)), not the old "name args" split; the old-style call
+	// here silently errored every time instead of resetting the submap.
+	// Config::Actions::setSubmap() is a direct, documented C++ entry point for
+	// the same effect and avoids an IPC round-trip + Lua escaping altogether.
+	Config::Actions::setSubmap("reset");
+	g_pExitEvent->emit({});
 	return {};
 
 }
@@ -69,8 +88,19 @@ SDispatchResult easymotionActionDispatch(std::string args)
 {
 	for (auto &ml : g_pGlobalState->motionLabels) {
 		if (ml->m_szKey == args) {
-			g_pEventManager->postEvent(SHyprIPCEvent{"easymotionselect", std::format("{},{}", ml->m_szWindowAddress, ml->m_szKey)});
-			g_pKeybindManager->m_dispatchers["exec"](ml->m_szActionCmd);
+			g_pSelectEvent->emit({ml->m_szWindowAddress, ml->m_szKey});
+			// g_pKeybindManager->m_dispatchers is gone in 0.56. hyprctl's
+			// "dispatch" verb now evaluates a Lua expression
+			// (hl.dispatch(<text>)) rather than splitting "name args", so the
+			// action command has to be embedded as a Lua string literal.
+			std::string escapedCmd;
+			escapedCmd.reserve(ml->m_szActionCmd.size());
+			for (char c : ml->m_szActionCmd) {
+				if (c == '\\' || c == '"')
+					escapedCmd += '\\';
+				escapedCmd += c;
+			}
+			HyprlandAPI::invokeHyprctlCommand("dispatch", "hl.dsp.exec_cmd(\"" + escapedCmd + "\")");
 			easymotionExitDispatch("");
 			break;
 		}
@@ -79,21 +109,63 @@ SDispatchResult easymotionActionDispatch(std::string args)
 	return {};
 }
 
+// g_pKeybindManager/SKeybind are gone in 0.56; binds are now built with
+// Keybinds::CBind::make() and registered on Keybinds::mgr(). This is a plugin-
+// internal API with no header-documented contract for the catch-all bind below,
+// so the exact flag/arg choice needs a live check (escape + stray keys while the
+// easymotion submap is up should not leak to global binds).
+SDispatchResult easymotionDispatch(std::string args);
+
+// hl.dsp is a static, hardcoded table of built-in dispatchers (0.56); plugins
+// have no way to add to it. The Lua-facing entry point is instead
+// hl.plugin.<namespace>.<name>, registered via HyprlandAPI::addLuaFunction.
+static int luaEasymotionDispatch(lua_State* L) {
+	const char* args = luaL_optstring(L, 1, "");
+	easymotionDispatch(std::string(args));
+	return 0;
+}
+
 void addEasyMotionKeybinds()
 {
-	g_pKeybindManager->addKeybind(SKeybind{"escape", {}, 0, 0, 0, {}, "easymotionexit", "", 0, "__easymotionsubmap__", "", "", 0, 0, 0, 0, 0, 0, 0, 0});
-	g_pKeybindManager->addKeybind(SKeybind{"", {}, 0, 1, 0, {}, "", "", 0, "__easymotionsubmap__", "", "", 0, 0, 0, 0, 0, 0, 0, 0});
+	using namespace Keybinds;
+
+	auto escBind = CBind::make(
+	    {"escape"}, 0,
+	    []() -> SBindResult {
+		    easymotionExitDispatch("");
+		    return {};
+	    },
+	    SExtraBindArgs{.metadata = {.submap = "__easymotionsubmap__"}});
+	if (escBind)
+		mgr()->addBind(std::move(*escBind));
+	else
+		Log::logger->log(Log::ERR, "easymotion: failed to register escape bind: {}", escBind.error());
+
+	// CBind::make rejects an empty keys list ("A bind requires a trigger") even
+	// for a BIND_FLAG_CATCH_ALL bind; the manager special-cases CATCH_ALL binds
+	// to skip the per-key match anyway (see CKeybindManager::processEvent), so
+	// the placeholder key here is never actually matched against.
+	auto catchAllBind = CBind::make(
+	    {"escape"}, BIND_FLAG_CATCH_ALL | BIND_FLAG_IGNORE_MODS,
+	    []() -> SBindResult { return {}; },
+	    SExtraBindArgs{.metadata = {.submap = "__easymotionsubmap__"}});
+	if (catchAllBind)
+		mgr()->addBind(std::move(*catchAllBind));
+	else
+		Log::logger->log(Log::ERR, "easymotion: failed to register catch-all bind: {}", catchAllBind.error());
 }
 
 
 void addLabelToWindow(PHLWINDOW window, SMotionActionDesc *actionDesc, std::string &key, std::string &label)
 {
-	UP<CHyprEasyLabel> motionlabel = makeUnique<CHyprEasyLabel>(window, actionDesc);
+	// addWindowDecoration now takes ownership as SP, not UP.
+	SP<CHyprEasyLabel> motionlabel = makeShared<CHyprEasyLabel>(window, actionDesc);
 	motionlabel->m_szKey = key;
 	motionlabel->m_szLabel = label;
 	g_pGlobalState->motionLabels.emplace_back(motionlabel);
 	motionlabel->m_self = motionlabel;
-	motionlabel->draw(window->m_monitor.lock(), 1.0);
+	// draw() now requires a live CRenderContext from the render pass, which isn't
+	// available here; the decoration framework draws it on the next real frame.
 	motionlabel->m_origFSMode = Fullscreen::controller()->getFullscreenModes(window).internal;
 	if ((motionlabel->m_origFSMode != Fullscreen::FSMODE_NONE) && (actionDesc->fullscreen_action != "none"))
 	{
@@ -165,8 +237,8 @@ SDispatchResult easymotionDispatch(std::string args)
 	SMotionActionDesc actionDesc;
 
 	actionDesc.textSize = configGetInt(g_textSize);
-	actionDesc.textColor = CHyprColor(configGetInt(g_textColor));
-	actionDesc.backgroundColor = CHyprColor(configGetInt(g_bgColor));
+	actionDesc.textColor = CHyprColor(Config::ParserUtils::parseColor(configGetString(g_textColor)).value_or(0xffffffff));
+	actionDesc.backgroundColor = CHyprColor(Config::ParserUtils::parseColor(configGetString(g_bgColor)).value_or(0xff));
 	actionDesc.textFont = configGetString(g_textFont);
 	CVarList2 cpadding = CVarList2(configGetString(g_textPadding));
 	actionDesc.boxPadding.parseGapData(cpadding);
@@ -247,7 +319,7 @@ SDispatchResult easymotionDispatch(std::string args)
 	for (auto &w : Desktop::viewState()->windows()) {
 		for (auto &m : State::monitorState()->monitors()) {
 			if (w->m_workspace == m->m_activeWorkspace || m->m_activeSpecialWorkspace == w->m_workspace) {
-				if (w->isHidden() || !w->m_isMapped)
+				if (w->isHidden() || !w->mapped())
 					continue;
 				if (m->m_activeSpecialWorkspace && w->m_workspace != m->m_activeSpecialWorkspace && actionDesc.only_special)
 					continue;
@@ -261,7 +333,7 @@ SDispatchResult easymotionDispatch(std::string args)
 	}
 
 	if (!g_pGlobalState->motionLabels.empty())
-		HyprlandAPI::invokeHyprctlCommand("dispatch", "submap __easymotionsubmap__");
+		Config::Actions::setSubmap("__easymotionsubmap__");
 
 	return {};
 }
@@ -299,16 +371,16 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 	    Config::Values::SIntValueOptions{});
 	HyprlandAPI::addConfigValueV2(PHANDLE, g_textSize);
 
-	g_textColor = makeShared<Config::Values::CIntValue>(
-	    "plugin:easymotion:textcolor", "Text color",
-	    Config::ParserUtils::parseColor("rgba(ffffffff)").value_or(0xffffffff),
-	    Config::Values::SIntValueOptions{});
+	// CStringValue + runtime parseColor, same as bordercolor below, rather than
+	// CIntValue: takes a plain "rgba(...)" string instead of a packed int, so
+	// the Nix/Lua config doesn't need to pre-pack ParserUtils::parseColor's
+	// 0xAARRGGBB layout itself.
+	g_textColor = makeShared<Config::Values::CStringValue>(
+	    "plugin:easymotion:textcolor", "Text color", "rgba(ffffffff)", Config::Values::SStringValueOptions{});
 	HyprlandAPI::addConfigValueV2(PHANDLE, g_textColor);
 
-	g_bgColor = makeShared<Config::Values::CIntValue>(
-	    "plugin:easymotion:bgcolor", "Background color",
-	    Config::ParserUtils::parseColor("rgba(000000ff)").value_or(0xff),
-	    Config::Values::SIntValueOptions{});
+	g_bgColor = makeShared<Config::Values::CStringValue>(
+	    "plugin:easymotion:bgcolor", "Background color", "rgba(000000ff)", Config::Values::SStringValueOptions{});
 	HyprlandAPI::addConfigValueV2(PHANDLE, g_bgColor);
 
 	g_textFont = makeShared<Config::Values::CStringValue>(
@@ -374,7 +446,16 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
 
 	g_pGlobalState = makeUnique<SGlobalState>();
+
+	g_pExitEvent = makeShared<Event::CEventBus::CCustomEvent>("easymotionexit", std::vector<Event::CEventBus::CCustomEvent::eType>{});
+	HyprlandAPI::addEvent(PHANDLE, g_pExitEvent);
+	g_pSelectEvent = makeShared<Event::CEventBus::CCustomEvent>(
+	    "easymotionselect",
+	    std::vector<Event::CEventBus::CCustomEvent::eType>{Event::CEventBus::CCustomEvent::TYPE_STRING, Event::CEventBus::CCustomEvent::TYPE_STRING});
+	HyprlandAPI::addEvent(PHANDLE, g_pSelectEvent);
+
 	HyprlandAPI::addDispatcherV2(PHANDLE, "easymotion", easymotionDispatch);
+	HyprlandAPI::addLuaFunction(PHANDLE, "easymotion", "dispatch", luaEasymotionDispatch);
 	HyprlandAPI::addDispatcherV2(PHANDLE, "easymotionaction", easymotionActionDispatch);
 	HyprlandAPI::addDispatcherV2(PHANDLE, "easymotionexit", easymotionExitDispatch);
 	static auto KPHOOK = Event::bus()->m_events.input.keyboard.key.listen([&](IKeyboard::SKeyEvent ev, Event::SCallbackInfo& info) {
