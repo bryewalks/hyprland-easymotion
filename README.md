@@ -6,10 +6,9 @@ https://github.com/zakk4223/hyprland-easymotion/assets/22642/9382b23e-efbd-466c-
 # Configuration
 Easymotion is basically a single dispatcher that brings up window labels and then allows you to execute a user-defined command when one of those labels is typed.
 
-## Lua config (Hyprland >= 0.56)
-Since 0.56, `hl.dsp` is a fixed table of Hyprland's own built-in dispatchers -
-plugins have no way to add entries to it. A plugin dispatcher is instead exposed
-as `hl.plugin.<namespace>.<name>`, which easymotion registers as
+## Calling it from Lua (Hyprland >= 0.56)
+`hl.dsp` is a fixed table of Hyprland's built-in dispatchers, so plugins expose
+themselves as `hl.plugin.<namespace>.<name>` instead. easymotion registers
 `hl.plugin.easymotion.dispatch`:
 
 ```lua
@@ -18,25 +17,13 @@ hl.bind("SUPER + z", function()
 end)
 ```
 
-This bind will bring up easymotion with SUPER+z. Once you select a window the window
-will focus. If you want to change the command, the selected window's address is
-substituted where "{}" occurs.
-
-`action:` is run as a literal shell command (easymotion invokes it the same way
-`exec-once` would), so it has to call `hyprctl` itself rather than name a
-dispatcher directly. Note also that `hyprctl dispatch <text>` itself changed in
-0.56: `<text>` is now evaluated as the Lua expression `hl.dispatch(<text>)`,
-not the pre-0.56 `dispatcher_name args` form - so the action above calls
-`hl.dsp.focus(...)`, not the old `focuswindow address:{}` syntax. If your
-action needs literal `{` or `}` (as `hl.dsp.focus`'s table argument does),
-double them (`{{`/`}}`): easymotion substitutes "{}" via `std::vformat`, which
-uses the same escaping convention as `std::format`.
-
-## hyprlang config (pre-0.56)
-`bind = SUPER, z, easymotion, action:hyprctl dispatch focuswindow address:{}`
-
-This bind will bring up easymotion with SUPER-z. Once you select a window the window
-will focus. If you want to change the command, the selected window's address is substituted where "{}" occurs.
+This brings up easymotion with SUPER+z; selecting a window focuses it.
+`action:` runs as a literal shell command, with "{}" substituted for the
+selected window's address, so it has to call `hyprctl` itself. `hyprctl
+dispatch <text>` evaluates `<text>` as the Lua expression `hl.dispatch(<text>)`
+in 0.56, so the action needs to call `hl.dsp.X(...)`, not a bare dispatcher
+name. Double any literal `{`/`}` in the action (`{{`/`}}`), since "{}" is
+substituted via `std::vformat`.
 
 
 You can configure the appearance of the labels. Defaults are as follows:
@@ -97,15 +84,11 @@ plugin {
 }
 ```
 
-Every one of these variables is also settable via the dispatcher, so you can create multiple dispatchers that look different based on function.
+Every one of these variables is also settable via the dispatcher, so you can create multiple dispatchers that look different based on function:
 
-Lua:
 ```lua
 hl.plugin.easymotion.dispatch([[bgcolor:rgba(ff0000ff),bordersize:5,action:hyprctl dispatch 'hl.dsp.window.close({window = "address:{}"})']])
 ```
-
-hyprlang (pre-0.56):
-`bind = SUPER, z, easymotion, bgcolor:rgba(ff0000ff),bordersize:5,action:hyprctl dispatch closewindow address:{}`
 
 # Installing
 
